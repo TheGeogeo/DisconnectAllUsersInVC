@@ -1,7 +1,7 @@
 /**
  * @name DisconnectAllUsersInVC
  * @author TheGeogeo
- * @version 1.0.2
+ * @version 1.1.0
  * @description Adds a skull button on voice channels to disconnect every user in that channel (admin required).
  * @website https://github.com/TheGeogeo/DisconnectAllUsersInVC
  * @source  https://github.com/TheGeogeo/DisconnectAllUsersInVC/blob/main/DisconnectAllUsersInVC.plugin.js
@@ -81,6 +81,25 @@ module.exports = class DisconnectAllUsersInVC {
     return new Promise(resolve => setTimeout(resolve, ms));
   }
 
+  orderUsersForDisconnect(userIds) {
+    const seen = new Set();
+    const unique = [];
+
+    for (const userId of Array.isArray(userIds) ? userIds : []) {
+      const id = String(userId || "");
+      if (!id || seen.has(id)) continue;
+      seen.add(id);
+      unique.push(id);
+    }
+
+    const me = this.getCurrentUserId();
+    if (!me) return unique;
+
+    const ordered = unique.filter(id => id !== me);
+    if (unique.includes(me)) ordered.push(me); // Always keep self last.
+    return ordered;
+  }
+
   getUserVoiceChannelId(guildId, userId) {
     const uid = String(userId);
 
@@ -110,8 +129,13 @@ module.exports = class DisconnectAllUsersInVC {
     return null;
   }
 
-  async waitForUserChannelChange(guildId, userId, previousChannelId, timeoutMs = 1200) {
-    const target = String(previousChannelId || "");
+  isUserInChannel(guildId, channelId, userId) {
+    const nowChannelId = this.getUserVoiceChannelId(guildId, userId);
+    return !!nowChannelId && String(nowChannelId) === String(channelId);
+  }
+
+  async waitForUserChannelChange(guildId, userId, targetChannelId, timeoutMs = 2500) {
+    const target = String(targetChannelId || "");
     const started = Date.now();
 
     while ((Date.now() - started) < timeoutMs) {
@@ -251,9 +275,13 @@ module.exports = class DisconnectAllUsersInVC {
     return Array.from(new Set(urls));
   }
 
-  async disconnectUser(guildId, userId) {
-    const beforeChannelId = this.getUserVoiceChannelId(guildId, userId);
-    if (!beforeChannelId) return;
+  async disconnectUser(guildId, channelId, userId) {
+    const targetChannelId = String(channelId || "");
+    if (!targetChannelId) throw new Error("Missing target channel id");
+
+    if (!this.isUserInChannel(guildId, targetChannelId, userId)) {
+      return { status: "already_out" };
+    }
 
     let lastError = null;
 
@@ -311,11 +339,19 @@ module.exports = class DisconnectAllUsersInVC {
         await strategy.run();
       } catch (err) {
         lastError = err;
+        if (this.isPermissionError(err)) break;
         continue;
       }
 
-      const changed = await this.waitForUserChannelChange(guildId, userId, beforeChannelId, 1200);
-      if (changed) return;
+      const changed = await this.waitForUserChannelChange(guildId, userId, targetChannelId, 2500);
+      if (changed) return { status: "disconnected", strategy: strategy.name };
+
+      lastError = new Error(`Strategy ${strategy.name} did not remove user ${userId} from channel ${targetChannelId}`);
+    }
+
+    // One last check in case the store updated just after timeout.
+    if (!this.isUserInChannel(guildId, targetChannelId, userId)) {
+      return { status: "disconnected", strategy: "late_state_update" };
     }
 
     throw lastError || new Error("All disconnect strategies failed");
@@ -334,20 +370,30 @@ module.exports = class DisconnectAllUsersInVC {
     this.inFlightChannels.add(channelId);
     this.refreshAllSlots();
 
+    const ordered = this.orderUsersForDisconnect(userIds);
+
     let success = 0;
+    let skipped = 0;
     let failed = 0;
     let permissionDenied = false;
 
     try {
-      for (const userId of userIds) {
+      for (const userId of ordered) {
         try {
-          await this.disconnectUser(guildId, userId);
-          success += 1;
+          const result = await this.disconnectUser(guildId, channelId, userId);
+          if (result?.status === "already_out") {
+            skipped += 1;
+          } else {
+            success += 1;
+          }
         } catch (err) {
           failed += 1;
           if (this.isPermissionError(err)) permissionDenied = true;
           this.error(`Failed to disconnect user ${userId}:`, err);
         }
+
+        // Small settle delay to keep requests strictly one by one.
+        await this.sleep(140);
       }
     } finally {
       this.inFlightChannels.delete(channelId);
@@ -355,19 +401,23 @@ module.exports = class DisconnectAllUsersInVC {
     }
 
     if (!failed) {
-      this.UI.showToast(`Disconnected ${success} user${success > 1 ? "s" : ""}.`, { type: "success" });
+      if (skipped) {
+        this.UI.showToast(`Disconnected ${success}, skipped ${skipped}.`, { type: "success" });
+      } else {
+        this.UI.showToast(`Disconnected ${success} user${success > 1 ? "s" : ""}.`, { type: "success" });
+      }
       return;
     }
 
     if (permissionDenied) {
       this.UI.showToast(
-        `Disconnected ${success}, failed ${failed}. Check your admin/voice permissions.`,
+        `Disconnected ${success}, skipped ${skipped}, failed ${failed}. Check your admin/voice permissions.`,
         { type: "danger", timeout: 6000 }
       );
       return;
     }
 
-    this.UI.showToast(`Disconnected ${success}, failed ${failed}.`, { type: "warning", timeout: 5000 });
+    this.UI.showToast(`Disconnected ${success}, skipped ${skipped}, failed ${failed}.`, { type: "warning", timeout: 5000 });
   }
 
   promptAndDisconnect(guildId, channelId) {
@@ -389,9 +439,7 @@ module.exports = class DisconnectAllUsersInVC {
     }
 
     // Keep self for the end so the action can finish cleanly.
-    const me = this.getCurrentUserId();
-    const ordered = userIds.filter(id => id !== me);
-    if (me && userIds.includes(me)) ordered.push(me);
+    const ordered = this.orderUsersForDisconnect(userIds);
 
     const channelLabel = channel?.name ? `#${channel.name}` : `#${channelId}`;
     const text = `Disconnect ${ordered.length} user${ordered.length > 1 ? "s" : ""} from ${channelLabel}?`;
