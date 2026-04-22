@@ -1,7 +1,7 @@
 /**
  * @name DisconnectAllUsersInVC
  * @author TheGeogeo
- * @version 1.2.0
+ * @version 1.2.1
  * @description Adds a skull button on voice channels to disconnect every user in that channel (admin required).
  * @website https://github.com/TheGeogeo/DisconnectAllUsersInVC
  * @source  https://github.com/TheGeogeo/DisconnectAllUsersInVC/blob/main/DisconnectAllUsersInVC.plugin.js
@@ -135,14 +135,15 @@ module.exports = class DisconnectAllUsersInVC {
     return !!nowChannelId && String(nowChannelId) === String(channelId);
   }
 
-  async waitForUserChannelChange(guildId, userId, targetChannelId, timeoutMs = 2500) {
+  async waitForUserChannelChange(guildId, userId, targetChannelId, timeoutMs = 2500, pollMs = 120) {
     const target = String(targetChannelId || "");
     const started = Date.now();
+    const interval = Math.max(20, Number(pollMs) || 120);
 
     while ((Date.now() - started) < timeoutMs) {
       const nowChannelId = this.getUserVoiceChannelId(guildId, userId);
       if (!nowChannelId || String(nowChannelId) !== target) return true;
-      await this.sleep(120);
+      await this.sleep(interval);
     }
 
     return false;
@@ -276,9 +277,11 @@ module.exports = class DisconnectAllUsersInVC {
     return Array.from(new Set(urls));
   }
 
-  async disconnectUser(guildId, channelId, userId) {
+  async disconnectUser(guildId, channelId, userId, options = {}) {
     const targetChannelId = String(channelId || "");
     if (!targetChannelId) throw new Error("Missing target channel id");
+    const verifyTimeoutMs = Math.max(120, Number(options?.verifyTimeoutMs) || 2500);
+    const verifyPollMs = Math.max(20, Number(options?.verifyPollMs) || 120);
 
     if (!this.isUserInChannel(guildId, targetChannelId, userId)) {
       return { status: "already_out" };
@@ -344,7 +347,7 @@ module.exports = class DisconnectAllUsersInVC {
         continue;
       }
 
-      const changed = await this.waitForUserChannelChange(guildId, userId, targetChannelId, 2500);
+      const changed = await this.waitForUserChannelChange(guildId, userId, targetChannelId, verifyTimeoutMs, verifyPollMs);
       if (changed) return { status: "disconnected", strategy: strategy.name };
 
       lastError = new Error(`Strategy ${strategy.name} did not remove user ${userId} from channel ${targetChannelId}`);
@@ -382,13 +385,19 @@ module.exports = class DisconnectAllUsersInVC {
     stats.success += 1;
   }
 
-  async disconnectUserWithRetries(guildId, channelId, userId, maxRetries = 0) {
-    const retries = Math.max(0, Number(maxRetries) || 0);
+  async disconnectUserWithRetries(guildId, channelId, userId, options = {}) {
+    const retries = Math.max(0, Number(options?.maxRetries) || 0);
+    const retryDelayMs = Math.max(0, Number(options?.retryDelayMs) || 160);
+    const verifyTimeoutMs = Math.max(120, Number(options?.verifyTimeoutMs) || 2500);
+    const verifyPollMs = Math.max(20, Number(options?.verifyPollMs) || 120);
     let lastError = null;
 
     for (let attempt = 0; attempt <= retries; attempt += 1) {
       try {
-        const result = await this.disconnectUser(guildId, channelId, userId);
+        const result = await this.disconnectUser(guildId, channelId, userId, {
+          verifyTimeoutMs,
+          verifyPollMs
+        });
         if (result?.status === "already_out") {
           return { status: "already_out", attempts: attempt + 1 };
         }
@@ -406,7 +415,13 @@ module.exports = class DisconnectAllUsersInVC {
         return { status: "disconnected", attempts: attempt + 1 };
       }
 
-      if (attempt < retries) await this.sleep(160);
+      if (attempt < retries && retryDelayMs > 0) await this.sleep(retryDelayMs);
+    }
+
+    // Very short grace period to absorb late store updates in fast modes.
+    await this.sleep(70);
+    if (!this.isUserInChannel(guildId, channelId, userId)) {
+      return { status: "disconnected", attempts: retries + 1 };
     }
 
     throw lastError || new Error(`Unable to disconnect user ${userId}`);
@@ -415,7 +430,12 @@ module.exports = class DisconnectAllUsersInVC {
   async executeDisconnectSafe(guildId, channelId, ordered, stats) {
     for (const userId of ordered) {
       try {
-        const result = await this.disconnectUserWithRetries(guildId, channelId, userId, 0);
+        const result = await this.disconnectUserWithRetries(guildId, channelId, userId, {
+          maxRetries: 0,
+          verifyTimeoutMs: 2500,
+          verifyPollMs: 120,
+          retryDelayMs: 0
+        });
         this.applyDisconnectOutcome(stats, userId, { result });
       } catch (err) {
         this.applyDisconnectOutcome(stats, userId, { error: err });
@@ -433,7 +453,12 @@ module.exports = class DisconnectAllUsersInVC {
 
     const runUser = async (userId) => {
       try {
-        const result = await this.disconnectUserWithRetries(guildId, channelId, userId, 3);
+        const result = await this.disconnectUserWithRetries(guildId, channelId, userId, {
+          maxRetries: 3,
+          verifyTimeoutMs: 700,
+          verifyPollMs: 50,
+          retryDelayMs: 80
+        });
         return { userId, result };
       } catch (error) {
         return { userId, error };
@@ -567,7 +592,7 @@ module.exports = class DisconnectAllUsersInVC {
         this.React.createElement(
           "span",
           { style: { fontSize: "12px", opacity: 0.85 } },
-          "Fire kicks without waiting for previous users. If still connected when response returns, retry up to 3 times."
+          "Fast mode: fire kicks without waiting for previous users. Quick checks + retry up to 3 times if still connected."
         )
       );
 
