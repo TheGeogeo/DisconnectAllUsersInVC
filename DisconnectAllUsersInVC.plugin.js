@@ -1,7 +1,7 @@
 /**
  * @name DisconnectAllUsersInVC
  * @author TheGeogeo
- * @version 1.1.0
+ * @version 1.2.0
  * @description Adds a skull button on voice channels to disconnect every user in that channel (admin required).
  * @website https://github.com/TheGeogeo/DisconnectAllUsersInVC
  * @source  https://github.com/TheGeogeo/DisconnectAllUsersInVC/blob/main/DisconnectAllUsersInVC.plugin.js
@@ -24,6 +24,7 @@ module.exports = class DisconnectAllUsersInVC {
     this.Webpack = BdApi.Webpack;
     this.DOM = BdApi.DOM;
     this.UI = BdApi.UI;
+    this.React = BdApi.React;
 
     // Discord stores/modules.
     this.UserStore = this.Webpack.getStore("UserStore");
@@ -361,7 +362,125 @@ module.exports = class DisconnectAllUsersInVC {
     return err?.status === 403 || err?.statusCode === 403 || err?.body?.code === 50013;
   }
 
-  async executeDisconnect(guildId, channelId, userIds) {
+  normalizeDisconnectMode(mode) {
+    return String(mode || "").toLowerCase() === "hard" ? "hard" : "safe";
+  }
+
+  applyDisconnectOutcome(stats, userId, outcome) {
+    if (outcome?.error) {
+      stats.failed += 1;
+      if (this.isPermissionError(outcome.error)) stats.permissionDenied = true;
+      this.error(`Failed to disconnect user ${userId}:`, outcome.error);
+      return;
+    }
+
+    if (outcome?.result?.status === "already_out") {
+      stats.skipped += 1;
+      return;
+    }
+
+    stats.success += 1;
+  }
+
+  async disconnectUserWithRetries(guildId, channelId, userId, maxRetries = 0) {
+    const retries = Math.max(0, Number(maxRetries) || 0);
+    let lastError = null;
+
+    for (let attempt = 0; attempt <= retries; attempt += 1) {
+      try {
+        const result = await this.disconnectUser(guildId, channelId, userId);
+        if (result?.status === "already_out") {
+          return { status: "already_out", attempts: attempt + 1 };
+        }
+        if (!this.isUserInChannel(guildId, channelId, userId)) {
+          return { status: "disconnected", attempts: attempt + 1 };
+        }
+
+        lastError = new Error(`User ${userId} still connected after attempt ${attempt + 1}`);
+      } catch (err) {
+        lastError = err;
+        if (this.isPermissionError(err)) break;
+      }
+
+      if (!this.isUserInChannel(guildId, channelId, userId)) {
+        return { status: "disconnected", attempts: attempt + 1 };
+      }
+
+      if (attempt < retries) await this.sleep(160);
+    }
+
+    throw lastError || new Error(`Unable to disconnect user ${userId}`);
+  }
+
+  async executeDisconnectSafe(guildId, channelId, ordered, stats) {
+    for (const userId of ordered) {
+      try {
+        const result = await this.disconnectUserWithRetries(guildId, channelId, userId, 0);
+        this.applyDisconnectOutcome(stats, userId, { result });
+      } catch (err) {
+        this.applyDisconnectOutcome(stats, userId, { error: err });
+      }
+
+      // Keep safe mode strictly one by one.
+      await this.sleep(140);
+    }
+  }
+
+  async executeDisconnectHard(guildId, channelId, ordered, stats) {
+    const me = this.getCurrentUserId();
+    const selfLast = me && ordered[ordered.length - 1] === me ? me : null;
+    const others = selfLast ? ordered.slice(0, -1) : ordered.slice();
+
+    const runUser = async (userId) => {
+      try {
+        const result = await this.disconnectUserWithRetries(guildId, channelId, userId, 3);
+        return { userId, result };
+      } catch (error) {
+        return { userId, error };
+      }
+    };
+
+    // Fire everyone except self without waiting for the previous user.
+    const outcomes = await Promise.all(others.map(runUser));
+    for (const outcome of outcomes) {
+      this.applyDisconnectOutcome(stats, outcome.userId, outcome);
+    }
+
+    // Always keep self disconnection for the end.
+    if (selfLast) {
+      const selfOutcome = await runUser(selfLast);
+      this.applyDisconnectOutcome(stats, selfOutcome.userId, selfOutcome);
+    }
+  }
+
+  showDisconnectSummaryToast(stats, mode) {
+    const modeLabel = mode === "hard" ? "Hard" : "Safe";
+    const { success, skipped, failed, permissionDenied } = stats;
+
+    if (!failed) {
+      if (skipped) {
+        this.UI.showToast(`${modeLabel}: disconnected ${success}, skipped ${skipped}.`, { type: "success" });
+      } else {
+        this.UI.showToast(`${modeLabel}: disconnected ${success} user${success > 1 ? "s" : ""}.`, { type: "success" });
+      }
+      return;
+    }
+
+    if (permissionDenied) {
+      this.UI.showToast(
+        `${modeLabel}: disconnected ${success}, skipped ${skipped}, failed ${failed}. Check your admin/voice permissions.`,
+        { type: "danger", timeout: 6000 }
+      );
+      return;
+    }
+
+    this.UI.showToast(
+      `${modeLabel}: disconnected ${success}, skipped ${skipped}, failed ${failed}.`,
+      { type: "warning", timeout: 5000 }
+    );
+  }
+
+  async executeDisconnect(guildId, channelId, userIds, mode = "safe") {
     if (this.inFlightChannels.has(channelId)) {
       this.UI.showToast("A disconnect action is already running for this channel.", { type: "warning" });
       return;
@@ -371,53 +490,109 @@ module.exports = class DisconnectAllUsersInVC {
     this.refreshAllSlots();
 
     const ordered = this.orderUsersForDisconnect(userIds);
+    const selectedMode = this.normalizeDisconnectMode(mode);
 
-    let success = 0;
-    let skipped = 0;
-    let failed = 0;
-    let permissionDenied = false;
+    const stats = {
+      success: 0,
+      skipped: 0,
+      failed: 0,
+      permissionDenied: false
+    };
 
     try {
-      for (const userId of ordered) {
-        try {
-          const result = await this.disconnectUser(guildId, channelId, userId);
-          if (result?.status === "already_out") {
-            skipped += 1;
-          } else {
-            success += 1;
-          }
-        } catch (err) {
-          failed += 1;
-          if (this.isPermissionError(err)) permissionDenied = true;
-          this.error(`Failed to disconnect user ${userId}:`, err);
-        }
-
-        // Small settle delay to keep requests strictly one by one.
-        await this.sleep(140);
+      if (selectedMode === "hard") {
+        await this.executeDisconnectHard(guildId, channelId, ordered, stats);
+      } else {
+        await this.executeDisconnectSafe(guildId, channelId, ordered, stats);
       }
     } finally {
       this.inFlightChannels.delete(channelId);
       this.refreshAllSlots();
     }
 
-    if (!failed) {
-      if (skipped) {
-        this.UI.showToast(`Disconnected ${success}, skipped ${skipped}.`, { type: "success" });
-      } else {
-        this.UI.showToast(`Disconnected ${success} user${success > 1 ? "s" : ""}.`, { type: "success" });
-      }
-      return;
-    }
+    this.showDisconnectSummaryToast(stats, selectedMode);
+  }
 
-    if (permissionDenied) {
-      this.UI.showToast(
-        `Disconnected ${success}, skipped ${skipped}, failed ${failed}. Check your admin/voice permissions.`,
-        { type: "danger", timeout: 6000 }
+  promptModeAndDisconnect(guildId, channelId, ordered, text) {
+    const run = (mode) => this.executeDisconnect(guildId, channelId, ordered, mode);
+
+    if (typeof this.UI?.showConfirmationModal === "function" && this.React?.createElement) {
+      const modeGroupName = `dauivc-mode-${guildId}-${channelId}-${Date.now()}`;
+      let selectedMode = "safe";
+
+      const optionStyle = {
+        display: "grid",
+        gap: "4px",
+        border: "1px solid var(--background-modifier-accent, rgba(255,255,255,0.12))",
+        borderRadius: "8px",
+        padding: "10px"
+      };
+
+      const safeOption = this.React.createElement(
+        "label",
+        { style: optionStyle },
+        this.React.createElement(
+          "span",
+          { style: { display: "flex", alignItems: "center", gap: "8px" } },
+          this.React.createElement("input", {
+            type: "radio",
+            name: modeGroupName,
+            value: "safe",
+            defaultChecked: true,
+            onChange: () => { selectedMode = "safe"; }
+          }),
+          this.React.createElement("strong", null, "Safe")
+        ),
+        this.React.createElement(
+          "span",
+          { style: { fontSize: "12px", opacity: 0.85 } },
+          "Disconnect one by one and wait for each result before moving on."
+        )
       );
+
+      const hardOption = this.React.createElement(
+        "label",
+        { style: optionStyle },
+        this.React.createElement(
+          "span",
+          { style: { display: "flex", alignItems: "center", gap: "8px" } },
+          this.React.createElement("input", {
+            type: "radio",
+            name: modeGroupName,
+            value: "hard",
+            onChange: () => { selectedMode = "hard"; }
+          }),
+          this.React.createElement("strong", null, "Hard")
+        ),
+        this.React.createElement(
+          "span",
+          { style: { fontSize: "12px", opacity: 0.85 } },
+          "Fire kicks without waiting for previous users. If still connected when response returns, retry up to 3 times."
+        )
+      );
+
+      const content = this.React.createElement(
+        "div",
+        { style: { display: "grid", gap: "10px" } },
+        this.React.createElement("div", null, text),
+        this.React.createElement("div", { style: { fontSize: "12px", opacity: 0.9 } }, "Choose mode:"),
+        safeOption,
+        hardOption
+      );
+
+      this.UI.showConfirmationModal("Disconnect All Users", content, {
+        danger: true,
+        confirmText: "Disconnect",
+        cancelText: "Cancel",
+        onConfirm: () => run(selectedMode)
+      });
       return;
     }
 
-    this.UI.showToast(`Disconnected ${success}, skipped ${skipped}, failed ${failed}.`, { type: "warning", timeout: 5000 });
+    if (!window.confirm(text)) return;
+    const raw = window.prompt("Choose disconnect mode: safe or hard", "safe");
+    if (raw == null) return;
+    run(this.normalizeDisconnectMode(raw));
   }
 
   promptAndDisconnect(guildId, channelId) {
@@ -443,19 +618,7 @@ module.exports = class DisconnectAllUsersInVC {
 
     const channelLabel = channel?.name ? `#${channel.name}` : `#${channelId}`;
     const text = `Disconnect ${ordered.length} user${ordered.length > 1 ? "s" : ""} from ${channelLabel}?`;
-    const confirm = () => this.executeDisconnect(guildId, channelId, ordered);
-
-    if (typeof this.UI?.showConfirmationModal === "function") {
-      this.UI.showConfirmationModal("Disconnect All Users", text, {
-        danger: true,
-        confirmText: "Disconnect",
-        cancelText: "Cancel",
-        onConfirm: confirm
-      });
-      return;
-    }
-
-    if (window.confirm(text)) confirm();
+    this.promptModeAndDisconnect(guildId, channelId, ordered, text);
   }
 
   createDisconnectButton(guildId, channelId, channel) {
