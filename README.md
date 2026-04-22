@@ -43,8 +43,8 @@ Open **Settings -> BetterDiscord -> Plugins -> DisconnectAllUsersInVC -> Setting
 
 ## Permissions
 
-- Button usage is restricted to users with **Administrator** (or guild owner).
-- Discord can still reject moves based on role hierarchy or voice permissions (notably `Move Members`).
+- Usage is allowed if you have **Move Members** or **Administrator** in that voice channel (guild owner also works).
+- Discord can still reject moves based on role hierarchy or other voice permission constraints.
 
 ---
 
@@ -97,8 +97,8 @@ Button size is controlled by CSS variable `--dauivc-size` (default `28px`).
 ## Troubleshooting
 
 - **Button not visible**: reload plugin and ensure you are in a guild channel list.
-- **Button disabled**: confirm your account has Administrator.
-- **Partial failures**: check role hierarchy and voice permissions (`Move Members`).
+- **Action disabled**: confirm your account has `Move Members` or `Administrator` on that channel.
+- **Partial failures**: check role hierarchy and channel voice permissions.
 - **Unexpected self behavior**: verify `Kick yourself` and `Kick yourself in last position` in settings.
 
 ---

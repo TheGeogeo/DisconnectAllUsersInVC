@@ -1,8 +1,8 @@
 /**
  * @name DisconnectAllUsersInVC
  * @author TheGeogeo
- * @version 1.5.0
- * @description Adds a skull button on voice channels to disconnect every user in that channel (admin required).
+ * @version 1.6.0
+ * @description Adds a skull button on voice channels to disconnect every user in that channel (Move Members or Administrator required).
  * @website https://github.com/TheGeogeo/DisconnectAllUsersInVC
  * @source  https://github.com/TheGeogeo/DisconnectAllUsersInVC/blob/main/DisconnectAllUsersInVC.plugin.js
  */
@@ -217,7 +217,13 @@ module.exports = class DisconnectAllUsersInVC {
     return 8n;
   }
 
-  hasAdminPermission(channel) {
+  getMoveMembersFlag() {
+    if (this.PermissionFlags?.MOVE_MEMBERS != null) return this.PermissionFlags.MOVE_MEMBERS;
+    if (this.PermissionFlags?.Permissions?.MOVE_MEMBERS != null) return this.PermissionFlags.Permissions.MOVE_MEMBERS;
+    return 16777216n;
+  }
+
+  hasDisconnectPermission(channel) {
     if (!channel) return false;
     const guildId = this.getChannelGuildId(channel);
     if (!guildId) return false;
@@ -230,23 +236,46 @@ module.exports = class DisconnectAllUsersInVC {
     if (ownerId && ownerId === userId) return true;
 
     const adminFlag = this.getAdministratorFlag();
+    const moveMembersFlag = this.getMoveMembersFlag();
+
+    const canWithFlag = (flag) => {
+      if (flag == null || typeof this.PermissionStore?.can !== "function") return false;
+      try { if (this.PermissionStore.can(flag, channel)) return true; } catch {}
+
+      if (typeof flag === "bigint") {
+        try { if (this.PermissionStore.can(Number(flag), channel)) return true; } catch {}
+      } else if (typeof flag === "number") {
+        try { if (this.PermissionStore.can(BigInt(flag), channel)) return true; } catch {}
+      }
+
+      return false;
+    };
 
     // Preferred check.
-    if (typeof this.PermissionStore?.can === "function") {
-      try { return !!this.PermissionStore.can(adminFlag, channel); } catch {}
-      try { return !!this.PermissionStore.can(Number(adminFlag), channel); } catch {}
-    }
+    if (canWithFlag(adminFlag) || canWithFlag(moveMembersFlag)) return true;
 
     // Fallback on raw bitfield if available.
     if (typeof this.PermissionStore?.getChannelPermissions === "function") {
       try {
         const perms = this.PermissionStore.getChannelPermissions(channel);
-        if (typeof perms === "bigint") return (perms & 8n) === 8n;
-        if (typeof perms === "number") return (perms & 8) === 8;
+        if (typeof perms === "bigint") {
+          const adminBit = typeof adminFlag === "bigint" ? adminFlag : BigInt(Number(adminFlag) || 8);
+          const moveBit = typeof moveMembersFlag === "bigint" ? moveMembersFlag : BigInt(Number(moveMembersFlag) || 16777216);
+          return (perms & adminBit) === adminBit || (perms & moveBit) === moveBit;
+        }
+        if (typeof perms === "number") {
+          const adminBit = Number(adminFlag) || 8;
+          const moveBit = Number(moveMembersFlag) || 16777216;
+          return (perms & adminBit) === adminBit || (perms & moveBit) === moveBit;
+        }
       } catch {}
     }
 
     return false;
+  }
+
+  hasAdminPermission(channel) {
+    return this.hasDisconnectPermission(channel);
   }
 
   flattenVoiceStates(payload, depth = 0) {
@@ -572,7 +601,7 @@ module.exports = class DisconnectAllUsersInVC {
 
     if (permissionDenied) {
       this.UI.showToast(
-        `${modeLabel}: disconnected ${success}, skipped ${skipped}, failed ${failed}. Check your admin/voice permissions.`,
+        `${modeLabel}: disconnected ${success}, skipped ${skipped}, failed ${failed}. Check your channel permissions (Move Members/Administrator).`,
         { type: "danger", timeout: 6000 }
       );
       return;
@@ -708,8 +737,8 @@ module.exports = class DisconnectAllUsersInVC {
       return;
     }
 
-    if (!this.hasAdminPermission(channel)) {
-      this.UI.showToast("You must be admin on this server to use this button.", { type: "danger" });
+    if (!this.hasDisconnectPermission(channel)) {
+      this.UI.showToast("You need Move Members or Administrator permission in this voice channel.", { type: "danger" });
       return;
     }
 
@@ -811,7 +840,7 @@ module.exports = class DisconnectAllUsersInVC {
   }
 
   buildContextMenuDisconnectItem(guildId, channelId, channel) {
-    const canUse = this.hasAdminPermission(channel);
+    const canUse = this.hasDisconnectPermission(channel);
     const isBusy = this.inFlightChannels.has(channelId);
 
     if (typeof this.ContextMenu?.buildItem !== "function") return null;
@@ -889,7 +918,7 @@ module.exports = class DisconnectAllUsersInVC {
 
   createDisconnectButton(guildId, channelId, channel) {
     const btn = document.createElement("button");
-    const canUse = this.hasAdminPermission(channel);
+    const canUse = this.hasDisconnectPermission(channel);
     const isBusy = this.inFlightChannels.has(channelId);
 
     btn.className = "dauivc-button";
@@ -902,7 +931,7 @@ module.exports = class DisconnectAllUsersInVC {
     if (isBusy) {
       btn.title = "Disconnect already running...";
     } else if (!canUse) {
-      btn.title = "Admin permission required";
+      btn.title = "Move Members or Administrator permission required";
     } else {
       btn.title = "Disconnect all users in this voice channel";
     }
