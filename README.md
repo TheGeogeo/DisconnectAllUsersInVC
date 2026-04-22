@@ -1,70 +1,86 @@
 # DisconnectAllUsersInVC - BetterDiscord Plugin
 
-> Adds a skull button next to voice channels to disconnect all users in that channel (admin required).
+> Adds a `💀` button next to guild voice channels to disconnect everyone in that channel.
 
 ⚠️ **Disclaimer**: BetterDiscord modifies the official Discord client and may violate Discord's Terms of Service. Use at your own risk. This project is not affiliated with Discord.
 
----
-
-## What it does
-
-- Adds a `💀` button next to guild voice channels in the channel list.
-- Prompts for confirmation before running any mass disconnect action.
-- Disconnects users from the selected voice channel, including Stage voice channels.
-- Keeps your own account for the end of the sequence so the action can complete cleanly.
-- Prevents duplicate runs on the same channel while one operation is already in progress.
-- Shows result toasts with success and failure counts.
+- Repository: `https://github.com/TheGeogeo/DisconnectAllUsersInVC`
+- Source file: `https://github.com/TheGeogeo/DisconnectAllUsersInVC/blob/main/DisconnectAllUsersInVC.plugin.js`
 
 ---
 
-## How it works (under the hood)
+## Features
 
-- Observes the channel list and injects a small slot next to each voice channel entry.
-- Uses BetterDiscord Webpack modules/stores:
-  - `VoiceStateStore` to detect users currently connected to a specific channel.
-  - `ChannelStore` and `GuildStore` to resolve channel and guild metadata.
-  - `PermissionStore` to check whether you can use the action.
-- Uses multiple disconnect strategies for compatibility:
-  - `MemberActions.setChannel(...)` with fallback signatures.
-  - Internal `HTTP.patch` calls on guild member endpoints with `channel_id: null` (and fallback payload forms).
-- Verifies that each user actually left the original channel before considering the attempt successful.
+- Adds a `💀` button next to voice channels in the guild channel list.
+- Confirmation modal before mass disconnect.
+- Two disconnect modes:
+  - **Safe**: disconnect users one by one (waits for each result).
+  - **Hard**: fast mode, does not wait between users and retries up to 3 times when needed.
+- Supports voice and stage voice channels.
+- Prevents duplicate actions on the same channel while a run is already in progress.
+- Clear toast summary (`disconnected`, `skipped`, `failed`).
+- Built-in update check against GitHub raw plugin URL.
+
+---
+
+## Settings
+
+Open **Settings -> BetterDiscord -> Plugins -> DisconnectAllUsersInVC -> Settings**.
+
+- **Kick yourself** (`boolean`)
+  - If disabled, your account is never included in the mass disconnect.
+- **Kick yourself in last position** (`boolean`)
+  - If enabled, your account is always processed after all others.
+  - If disabled, your account keeps its natural voice-state order position.
+- **Default disconnect settings** (`Safe` / `Hard`)
+  - Preselected mode in the confirmation modal.
 
 ---
 
 ## Permissions
 
-- The button is enabled only if you have **Administrator** on the guild (or you are guild owner).
-- Discord may still reject some moves without required voice permissions (for example `Move Members`), in which case failures are reported.
+- Button usage is restricted to users with **Administrator** (or guild owner).
+- Discord can still reject moves based on role hierarchy or voice permissions (notably `Move Members`).
 
 ---
 
 ## Installation
 
-1. Download the plugin file: `DisconnectAllUsersInVC.plugin.js`.
-2. Put it in your BetterDiscord plugins folder:
+1. Download `DisconnectAllUsersInVC.plugin.js`.
+2. Place it in your BetterDiscord plugins folder:
    - **Windows**: `%AppData%\\BetterDiscord\\plugins`
    - **macOS**: `~/Library/Application Support/BetterDiscord/plugins`
    - **Linux**: `~/.config/BetterDiscord/plugins`
-3. In Discord: **Settings -> BetterDiscord -> Plugins**, enable **DisconnectAllUsersInVC**.
+3. Enable it in **Settings -> BetterDiscord -> Plugins**.
 
-> Restart Discord if the plugin does not appear immediately.
+> Restart Discord if the plugin does not appear right away.
 
 ---
 
 ## Usage
 
-1. Open a server channel list and locate a voice channel.
-2. Click the `💀` button next to that channel.
-3. Confirm the action in the modal.
-4. Wait for completion and read the toast summary.
+1. Open a guild channel list.
+2. Click the `💀` button on a voice channel.
+3. Choose **Safe** or **Hard** in the confirmation modal.
+4. Confirm and wait for the result toast.
 
 ---
 
-## UI and customization
+## How it works (technical)
 
-- The button size uses CSS variable `--dauivc-size` (default `28px`).
+- Injects UI slots next to voice-channel anchors via `MutationObserver`.
+- Reads stores/modules with BetterDiscord Webpack:
+  - `VoiceStateStore`, `ChannelStore`, `GuildStore`, `PermissionStore`.
+- Executes disconnect through multiple strategies for compatibility:
+  - `MemberActions.setChannel(...)` fallbacks.
+  - Internal `HTTP.patch` on guild member endpoint (`channel_id: null` / `channelId: null`).
+- Verifies effective channel change and applies retries when configured (Hard mode).
 
-Example override in Custom CSS:
+---
+
+## Customization
+
+Button size is controlled by CSS variable `--dauivc-size` (default `28px`).
 
 ```css
 :root { --dauivc-size: 32px; }
@@ -72,31 +88,30 @@ Example override in Custom CSS:
 
 ---
 
-## Limitations and notes
-
-- Works only in guild voice channels, not DMs/group calls.
-- If Discord changes internal module names or signatures, this plugin may require updates.
-- The operation is sequential by design to improve reliability and produce accurate per-user results.
-
----
-
 ## Troubleshooting
 
-- **Button not visible**: reload the plugin and verify you are viewing a guild channel list.
-- **Button disabled**: check that your account has Administrator in that server.
-- **Partial failures**: check role hierarchy and voice permissions (`Move Members` in particular).
+- **Button not visible**: reload plugin and ensure you are in a guild channel list.
+- **Button disabled**: confirm your account has Administrator.
+- **Partial failures**: check role hierarchy and voice permissions (`Move Members`).
+- **Unexpected self behavior**: verify `Kick yourself` and `Kick yourself in last position` in settings.
 
 ---
 
-## Security and privacy
+## Security & Privacy
 
-- No analytics and no third-party network calls.
-- Uses Discord client internals to execute member channel moves.
+- No analytics.
+- No third-party network API calls for disconnect actions.
 - Does not inspect messages or exfiltrate account data.
 
 ---
 
 ## Contributing
 
-Issues and PRs are welcome. Please include reproduction steps, OS, Discord build, BetterDiscord version, and plugin version.
+Issues and PRs are welcome. Please include:
+
+- Reproduction steps
+- OS
+- Discord build
+- BetterDiscord version
+- Plugin version
 
