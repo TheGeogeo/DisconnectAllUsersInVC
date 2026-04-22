@@ -3,12 +3,18 @@
  * @author TheGeogeo
  * @version 1.0.2
  * @description Adds a skull button on voice channels to disconnect every user in that channel (admin required).
+ * @website https://github.com/TheGeogeo/DisconnectAllUsersInVC
+ * @source  https://github.com/TheGeogeo/DisconnectAllUsersInVC/blob/main/DisconnectAllUsersInVC.plugin.js
  */
+
+// Remote raw URL of this plugin for update checks.
+const UPDATE_URL = "https://raw.githubusercontent.com/TheGeogeo/DisconnectAllUsersInVC/main/DisconnectAllUsersInVC.plugin.js";
 
 module.exports = class DisconnectAllUsersInVC {
   constructor(meta) {
     this.meta = meta;
     this.pluginId = "DisconnectAllUsersInVC";
+    this.currentVersion = meta?.version || "0.0.0";
     this.cssId = "disconnect-all-users-in-vc-css";
     this.observer = null;
     this.scanFrame = null;
@@ -567,10 +573,69 @@ module.exports = class DisconnectAllUsersInVC {
     this.DOM.removeStyle(this.cssId);
   }
 
+  /**
+   * Check for updates and show BD's update banner if a newer version is available.
+   * Tries BetterDiscord's built-in PluginUpdater first, then ZeresPluginLibrary,
+   * and finally falls back to a simple fetch+compare.
+   */
+  checkForUpdates() {
+    const name = "DisconnectAllUsersInVC";
+    const current = this.currentVersion;
+
+    // 1) Prefer BetterDiscord's built-in PluginUpdater (if present).
+    const BDUpdater = window.PluginUpdater || BdApi?.PluginUpdater;
+    if (BDUpdater && typeof BDUpdater.checkForUpdate === "function") {
+      try {
+        BDUpdater.checkForUpdate(name, current, UPDATE_URL);
+        return;
+      } catch (e) {
+        try { BdApi.Logger.warn(this.pluginId, "BD PluginUpdater failed:", e); } catch {}
+      }
+    }
+
+    // 2) Fallback to ZeresPluginLibrary's PluginUpdater (if user has it).
+    const ZLib = window.ZeresPluginLibrary || window.ZLibrary || globalThis?.ZeresPluginLibrary;
+    if (ZLib?.PluginUpdater?.checkForUpdate) {
+      try {
+        ZLib.PluginUpdater.checkForUpdate(name, current, UPDATE_URL);
+        return;
+      } catch (e) {
+        try { BdApi.Logger.warn(this.pluginId, "ZLib PluginUpdater failed:", e); } catch {}
+      }
+    }
+
+    // 3) Last resort: manual compare using BdApi.Net.fetch.
+    // Looks for a semantic version like "1.2.3" in the remote file.
+    const doManualCheck = async () => {
+      try {
+        const res = await BdApi.Net.fetch(UPDATE_URL, { method: "GET" });
+        if (!res || !res.text) return;
+        const text = await res.text();
+        const match = text.match(/@version\s+([0-9]+\.[0-9]+\.[0-9]+)/i) || text.match(/["']([0-9]+\.[0-9]+\.[0-9]+)["']/);
+        if (!match) return;
+        const remote = String(match[1]);
+        const newer = (a, b) => {
+          const pa = a.split(".").map(n => parseInt(n, 10) || 0);
+          const pb = b.split(".").map(n => parseInt(n, 10) || 0);
+          for (let i = 0; i < 3; i++) if (pa[i] !== pb[i]) return pb[i] > pa[i];
+          return false;
+        };
+        if (newer(current, remote)) {
+          BdApi.UI.showToast(`${name} update available: ${current} -> ${remote}`, { type: "info", timeout: 6000 });
+        }
+      } catch (e) {
+        try { BdApi.Logger.warn(this.pluginId, "Manual update check failed:", e); } catch {}
+      }
+    };
+    doManualCheck();
+  }
+
   start() {
     this.addStyles();
     this.startObserver();
     this.log("Started");
+
+    this.checkForUpdates();
   }
 
   stop() {
