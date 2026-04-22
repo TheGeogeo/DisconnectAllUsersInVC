@@ -11,7 +11,9 @@
 
 ## Features
 
-- Adds a `💀` button next to voice channels in the guild channel list.
+- Adds disconnect action entry points in the UI:
+  - `💀` button next to voice channels.
+  - `💀 Disconnect All Users` entry in the voice-channel context menu.
 - Confirmation modal before mass disconnect.
 - Two disconnect modes:
   - **Safe**: disconnect users one by one (waits for each result).
@@ -34,6 +36,8 @@ Open **Settings -> BetterDiscord -> Plugins -> DisconnectAllUsersInVC -> Setting
   - If disabled, your account keeps its natural voice-state order position.
 - **Default disconnect settings** (`Safe` / `Hard`)
   - Preselected mode in the confirmation modal.
+- **Disconnect option** (`Button on channel` / `In context menu` / `Both`)
+  - Controls where the disconnect action is available in the UI.
 
 ---
 
@@ -60,7 +64,9 @@ Open **Settings -> BetterDiscord -> Plugins -> DisconnectAllUsersInVC -> Setting
 ## Usage
 
 1. Open a guild channel list.
-2. Click the `💀` button on a voice channel.
+2. Trigger disconnect from either:
+   - the `💀` button on a voice channel
+   - the channel right-click context menu (`💀 Disconnect All Users`)
 3. Choose **Safe** or **Hard** in the confirmation modal.
 4. Confirm and wait for the result toast.
 

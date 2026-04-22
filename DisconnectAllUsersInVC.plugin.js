@@ -1,7 +1,7 @@
 /**
  * @name DisconnectAllUsersInVC
  * @author TheGeogeo
- * @version 1.3.0
+ * @version 1.5.0
  * @description Adds a skull button on voice channels to disconnect every user in that channel (admin required).
  * @website https://github.com/TheGeogeo/DisconnectAllUsersInVC
  * @source  https://github.com/TheGeogeo/DisconnectAllUsersInVC/blob/main/DisconnectAllUsersInVC.plugin.js
@@ -18,10 +18,12 @@ module.exports = class DisconnectAllUsersInVC {
     this.cssId = "disconnect-all-users-in-vc-css";
     this.observer = null;
     this.scanFrame = null;
+    this.contextMenuUnpatches = [];
     this.inFlightChannels = new Set();
 
     // BetterDiscord helpers.
     this.Webpack = BdApi.Webpack;
+    this.ContextMenu = BdApi.ContextMenu;
     this.Data = BdApi.Data;
     this.DOM = BdApi.DOM;
     this.UI = BdApi.UI;
@@ -89,7 +91,8 @@ module.exports = class DisconnectAllUsersInVC {
     return {
       kickSelf: true,
       kickSelfLast: true,
-      defaultMode: "safe"
+      defaultMode: "safe",
+      disconnectOption: "both"
     };
   }
 
@@ -108,6 +111,7 @@ module.exports = class DisconnectAllUsersInVC {
     merged.kickSelf = !!merged.kickSelf;
     merged.kickSelfLast = !!merged.kickSelfLast;
     merged.defaultMode = this.normalizeDisconnectMode(merged.defaultMode);
+    merged.disconnectOption = this.normalizeDisconnectOption(merged.disconnectOption);
 
     return merged;
   }
@@ -122,6 +126,7 @@ module.exports = class DisconnectAllUsersInVC {
     this.settings.kickSelf = !!this.settings.kickSelf;
     this.settings.kickSelfLast = !!this.settings.kickSelfLast;
     this.settings.defaultMode = this.normalizeDisconnectMode(this.settings.defaultMode);
+    this.settings.disconnectOption = this.normalizeDisconnectOption(this.settings.disconnectOption);
 
     try {
       this.Data?.save?.(this.pluginId, "settings", this.settings);
@@ -422,6 +427,23 @@ module.exports = class DisconnectAllUsersInVC {
     return err?.status === 403 || err?.statusCode === 403 || err?.body?.code === 50013;
   }
 
+  normalizeDisconnectOption(option) {
+    const value = String(option || "").toLowerCase().trim();
+    if (value === "button" || value === "button-on-channel" || value === "channel-button") return "button";
+    if (value === "context" || value === "context-menu" || value === "in-context-menu") return "context";
+    return "both";
+  }
+
+  hasChannelButtonEnabled() {
+    const option = this.normalizeDisconnectOption(this.settings?.disconnectOption);
+    return option === "button" || option === "both";
+  }
+
+  hasContextMenuEnabled() {
+    const option = this.normalizeDisconnectOption(this.settings?.disconnectOption);
+    return option === "context" || option === "both";
+  }
+
   normalizeDisconnectMode(mode) {
     return String(mode || "").toLowerCase() === "hard" ? "hard" : "safe";
   }
@@ -705,6 +727,166 @@ module.exports = class DisconnectAllUsersInVC {
     this.promptModeAndDisconnect(guildId, channelId, ordered, text);
   }
 
+  getChannelIdFromContextProps(props) {
+    const candidates = [
+      props?.channel?.id,
+      props?.channel?.channelId,
+      props?.channel?.channel_id,
+      props?.channelId,
+      props?.id,
+      props?.targetChannelId,
+      props?.target?.id
+    ];
+
+    for (const candidate of candidates) {
+      if (candidate != null && candidate !== "") return String(candidate);
+    }
+
+    return null;
+  }
+
+  resolveVoiceChannelFromContextProps(props) {
+    const direct = props?.channel;
+    const directId = String(direct?.id ?? direct?.channelId ?? direct?.channel_id ?? "");
+    const channelId = directId || this.getChannelIdFromContextProps(props);
+    if (!channelId) return null;
+
+    const channel = direct || this.ChannelStore?.getChannel?.(channelId);
+    if (!channel || !this.isVoiceChannel(channel)) return null;
+
+    const guildId = this.getChannelGuildId(channel);
+    if (!guildId) return null;
+
+    return { channel, channelId: String(channelId), guildId: String(guildId) };
+  }
+
+  hasContextMenuItemId(root, itemId) {
+    const stack = Array.isArray(root) ? [...root] : [root];
+    while (stack.length) {
+      const node = stack.pop();
+      if (!node || typeof node !== "object") continue;
+
+      const id = node?.props?.id ?? node?.id;
+      if (id === itemId) return true;
+
+      const child = node?.props?.children;
+      if (Array.isArray(child)) stack.push(...child);
+      else if (child != null) stack.push(child);
+    }
+    return false;
+  }
+
+  addContextMenuItemToChildren(children, itemBuilder, itemId) {
+    if (!Array.isArray(children)) return false;
+    if (this.hasContextMenuItemId(children, itemId)) return true;
+
+    const item = itemBuilder();
+    if (!item) return false;
+    children.push(item);
+    return true;
+  }
+
+  injectContextMenuItem(retVal, itemBuilder, itemId) {
+    if (Array.isArray(retVal)) {
+      return this.addContextMenuItemToChildren(retVal, itemBuilder, itemId);
+    }
+
+    if (!retVal?.props) return false;
+
+    if (Array.isArray(retVal.props.children)) {
+      return this.addContextMenuItemToChildren(retVal.props.children, itemBuilder, itemId);
+    }
+
+    if (typeof retVal.props.children === "function") {
+      const originalChildren = retVal.props.children;
+      retVal.props.children = (...args) => {
+        const rendered = originalChildren(...args);
+        this.injectContextMenuItem(rendered, itemBuilder, itemId);
+        return rendered;
+      };
+      return true;
+    }
+
+    return false;
+  }
+
+  buildContextMenuDisconnectItem(guildId, channelId, channel) {
+    const canUse = this.hasAdminPermission(channel);
+    const isBusy = this.inFlightChannels.has(channelId);
+
+    if (typeof this.ContextMenu?.buildItem !== "function") return null;
+
+    return this.ContextMenu.buildItem({
+      type: "text",
+      id: "dauivc-disconnect-all-users",
+      label: "💀 Disconnect All Users",
+      className: "dauivc-context-danger",
+      color: "danger",
+      danger: true,
+      disabled: isBusy || !canUse,
+      action: () => this.promptAndDisconnect(guildId, channelId)
+    });
+  }
+
+  handleChannelContextMenuPatch(retVal, props) {
+    const resolved = this.resolveVoiceChannelFromContextProps(props);
+    if (!resolved) return;
+
+    const { guildId, channelId, channel } = resolved;
+    const itemId = "dauivc-disconnect-all-users";
+    this.injectContextMenuItem(
+      retVal,
+      () => this.buildContextMenuDisconnectItem(guildId, channelId, channel),
+      itemId
+    );
+  }
+
+  patchChannelContextMenus() {
+    this.unpatchChannelContextMenus();
+    if (!this.hasContextMenuEnabled()) return;
+
+    if (typeof this.ContextMenu?.patch !== "function") {
+      this.log("ContextMenu API not available, skipping channel context menu integration.");
+      return;
+    }
+
+    const menuIds = [
+      "channel-context",
+      "guild-channel-context",
+      "channel-mention-context"
+    ];
+
+    for (const menuId of menuIds) {
+      try {
+        const unpatch = this.ContextMenu.patch(menuId, (retVal, props) => {
+          this.handleChannelContextMenuPatch(retVal, props);
+        });
+        if (typeof unpatch === "function") this.contextMenuUnpatches.push(unpatch);
+      } catch (err) {
+        this.error(`Failed to patch context menu '${menuId}':`, err);
+      }
+    }
+  }
+
+  unpatchChannelContextMenus() {
+    for (const unpatch of this.contextMenuUnpatches.splice(0)) {
+      try { unpatch(); } catch {}
+    }
+  }
+
+  applyDisconnectOptionUi() {
+    if (this.hasChannelButtonEnabled()) {
+      this.startObserver();
+      this.refreshAllSlots();
+    } else {
+      this.stopObserver();
+      document.querySelectorAll(".dauivc-slot").forEach(node => node.remove());
+    }
+
+    if (this.hasContextMenuEnabled()) this.patchChannelContextMenus();
+    else this.unpatchChannelContextMenus();
+  }
+
   createDisconnectButton(guildId, channelId, channel) {
     const btn = document.createElement("button");
     const canUse = this.hasAdminPermission(channel);
@@ -748,6 +930,7 @@ module.exports = class DisconnectAllUsersInVC {
   }
 
   injectSlotForAnchor(anchor) {
+    if (!this.hasChannelButtonEnabled()) return;
     if (!anchor || anchor.querySelector(".dauivc-slot")) return;
 
     const dataId = anchor.getAttribute("data-list-item-id") || "";
@@ -778,6 +961,11 @@ module.exports = class DisconnectAllUsersInVC {
   }
 
   refreshAllSlots() {
+    if (!this.hasChannelButtonEnabled()) {
+      document.querySelectorAll(".dauivc-slot").forEach(node => node.remove());
+      return;
+    }
+
     document.querySelectorAll(".dauivc-slot").forEach(slot => {
       const channelId = slot.dataset.channelId;
       const guildId = slot.dataset.guildId || this.getGuildIdFromChannelId(channelId);
@@ -787,6 +975,9 @@ module.exports = class DisconnectAllUsersInVC {
   }
 
   startObserver() {
+    if (!this.hasChannelButtonEnabled()) return;
+    if (this.observer) return;
+
     const handle = () => {
       this.scanFrame = null;
       const anchors = document.querySelectorAll('a[data-list-item-id^="channels___"]');
@@ -859,6 +1050,11 @@ module.exports = class DisconnectAllUsersInVC {
         transform: none;
         filter: grayscale(.35);
       }
+
+      .dauivc-context-danger,
+      .dauivc-context-danger * {
+        color: var(--status-danger, #ed4245) !important;
+      }
     `;
 
     this.DOM.addStyle(this.cssId, css);
@@ -927,7 +1123,7 @@ module.exports = class DisconnectAllUsersInVC {
 
   start() {
     this.addStyles();
-    this.startObserver();
+    this.applyDisconnectOptionUi();
     this.log("Started");
 
     this.checkForUpdates();
@@ -935,6 +1131,7 @@ module.exports = class DisconnectAllUsersInVC {
 
   stop() {
     this.stopObserver();
+    this.unpatchChannelContextMenus();
     this.removeStyles();
     document.querySelectorAll(".dauivc-slot").forEach(node => node.remove());
     this.log("Stopped");
@@ -1042,6 +1239,36 @@ module.exports = class DisconnectAllUsersInVC {
     modeRow.label.appendChild(modeSelect);
     wrap.appendChild(modeRow.row);
 
+    const optionRow = makeRow(
+      "Disconnect option",
+      "Choose where the disconnect action is available."
+    );
+    const disconnectOptionSelect = document.createElement("select");
+    disconnectOptionSelect.style.padding = "4px 8px";
+    disconnectOptionSelect.style.borderRadius = "6px";
+    disconnectOptionSelect.style.background = "var(--background-primary, #1e1f22)";
+    disconnectOptionSelect.style.color = "var(--text-normal, #fff)";
+    disconnectOptionSelect.style.border = "1px solid var(--background-modifier-accent, rgba(255,255,255,0.12))";
+
+    const optionButton = document.createElement("option");
+    optionButton.value = "button";
+    optionButton.textContent = "Button on channel";
+    disconnectOptionSelect.appendChild(optionButton);
+
+    const optionContext = document.createElement("option");
+    optionContext.value = "context";
+    optionContext.textContent = "In context menu";
+    disconnectOptionSelect.appendChild(optionContext);
+
+    const optionBoth = document.createElement("option");
+    optionBoth.value = "both";
+    optionBoth.textContent = "Both";
+    disconnectOptionSelect.appendChild(optionBoth);
+
+    disconnectOptionSelect.value = this.normalizeDisconnectOption(settings.disconnectOption);
+    optionRow.label.appendChild(disconnectOptionSelect);
+    wrap.appendChild(optionRow.row);
+
     const status = document.createElement("div");
     status.style.fontSize = "12px";
     status.style.opacity = "0.85";
@@ -1065,6 +1292,11 @@ module.exports = class DisconnectAllUsersInVC {
 
     modeSelect.addEventListener("change", () => {
       persist({ defaultMode: modeSelect.value });
+    });
+
+    disconnectOptionSelect.addEventListener("change", () => {
+      persist({ disconnectOption: disconnectOptionSelect.value });
+      this.applyDisconnectOptionUi();
     });
 
     syncKickSelfLastState();
