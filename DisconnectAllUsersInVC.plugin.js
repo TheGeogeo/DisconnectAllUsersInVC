@@ -1,7 +1,7 @@
 /**
  * @name DisconnectAllUsersInVC
  * @author TheGeogeo
- * @version 1.2.1
+ * @version 1.3.0
  * @description Adds a skull button on voice channels to disconnect every user in that channel (admin required).
  * @website https://github.com/TheGeogeo/DisconnectAllUsersInVC
  * @source  https://github.com/TheGeogeo/DisconnectAllUsersInVC/blob/main/DisconnectAllUsersInVC.plugin.js
@@ -22,9 +22,12 @@ module.exports = class DisconnectAllUsersInVC {
 
     // BetterDiscord helpers.
     this.Webpack = BdApi.Webpack;
+    this.Data = BdApi.Data;
     this.DOM = BdApi.DOM;
     this.UI = BdApi.UI;
     this.React = BdApi.React;
+
+    this.settings = this.loadSettings();
 
     // Discord stores/modules.
     this.UserStore = this.Webpack.getStore("UserStore");
@@ -82,6 +85,51 @@ module.exports = class DisconnectAllUsersInVC {
     return new Promise(resolve => setTimeout(resolve, ms));
   }
 
+  getDefaultSettings() {
+    return {
+      kickSelf: true,
+      kickSelfLast: true,
+      defaultMode: "safe"
+    };
+  }
+
+  loadSettings() {
+    const defaults = this.getDefaultSettings();
+    let saved = null;
+    try {
+      saved = this.Data?.load?.(this.pluginId, "settings");
+    } catch {}
+
+    const merged = {
+      ...defaults,
+      ...(saved && typeof saved === "object" ? saved : {})
+    };
+
+    merged.kickSelf = !!merged.kickSelf;
+    merged.kickSelfLast = !!merged.kickSelfLast;
+    merged.defaultMode = this.normalizeDisconnectMode(merged.defaultMode);
+
+    return merged;
+  }
+
+  saveSettings(nextSettings) {
+    this.settings = {
+      ...this.getDefaultSettings(),
+      ...(this.settings || {}),
+      ...(nextSettings || {})
+    };
+
+    this.settings.kickSelf = !!this.settings.kickSelf;
+    this.settings.kickSelfLast = !!this.settings.kickSelfLast;
+    this.settings.defaultMode = this.normalizeDisconnectMode(this.settings.defaultMode);
+
+    try {
+      this.Data?.save?.(this.pluginId, "settings", this.settings);
+    } catch (err) {
+      this.error("Failed to save settings:", err);
+    }
+  }
+
   orderUsersForDisconnect(userIds) {
     const seen = new Set();
     const unique = [];
@@ -95,9 +143,18 @@ module.exports = class DisconnectAllUsersInVC {
 
     const me = this.getCurrentUserId();
     if (!me) return unique;
+    if (!unique.includes(me)) return unique;
+
+    if (!this.settings?.kickSelf) {
+      return unique.filter(id => id !== me);
+    }
+
+    if (!this.settings?.kickSelfLast) {
+      return unique;
+    }
 
     const ordered = unique.filter(id => id !== me);
-    if (unique.includes(me)) ordered.push(me); // Always keep self last.
+    ordered.push(me);
     return ordered;
   }
 
@@ -540,10 +597,11 @@ module.exports = class DisconnectAllUsersInVC {
 
   promptModeAndDisconnect(guildId, channelId, ordered, text) {
     const run = (mode) => this.executeDisconnect(guildId, channelId, ordered, mode);
+    const defaultMode = this.normalizeDisconnectMode(this.settings?.defaultMode);
 
     if (typeof this.UI?.showConfirmationModal === "function" && this.React?.createElement) {
       const modeGroupName = `dauivc-mode-${guildId}-${channelId}-${Date.now()}`;
-      let selectedMode = "safe";
+      let selectedMode = defaultMode;
 
       const optionStyle = {
         display: "grid",
@@ -563,7 +621,7 @@ module.exports = class DisconnectAllUsersInVC {
             type: "radio",
             name: modeGroupName,
             value: "safe",
-            defaultChecked: true,
+            defaultChecked: selectedMode === "safe",
             onChange: () => { selectedMode = "safe"; }
           }),
           this.React.createElement("strong", null, "Safe")
@@ -585,6 +643,7 @@ module.exports = class DisconnectAllUsersInVC {
             type: "radio",
             name: modeGroupName,
             value: "hard",
+            defaultChecked: selectedMode === "hard",
             onChange: () => { selectedMode = "hard"; }
           }),
           this.React.createElement("strong", null, "Hard")
@@ -615,7 +674,7 @@ module.exports = class DisconnectAllUsersInVC {
     }
 
     if (!window.confirm(text)) return;
-    const raw = window.prompt("Choose disconnect mode: safe or hard", "safe");
+    const raw = window.prompt("Choose disconnect mode: safe or hard", defaultMode);
     if (raw == null) return;
     run(this.normalizeDisconnectMode(raw));
   }
@@ -885,11 +944,130 @@ module.exports = class DisconnectAllUsersInVC {
     const wrap = document.createElement("div");
     wrap.style.padding = "12px";
     wrap.style.lineHeight = "1.5";
-    wrap.innerHTML = `
+    wrap.style.display = "grid";
+    wrap.style.gap = "12px";
+
+    const title = document.createElement("div");
+    title.innerHTML = `
       <strong>DisconnectAllUsersInVC</strong><br>
-      Adds a <code>💀</code> button next to guild voice channels.<br>
-      Click it to disconnect everyone in that channel (admin required).
+      Configure how bulk disconnection behaves.
     `;
+    wrap.appendChild(title);
+
+    const settings = {
+      ...this.getDefaultSettings(),
+      ...(this.settings || {})
+    };
+
+    const makeRow = (labelText, helperText) => {
+      const row = document.createElement("div");
+      row.style.display = "grid";
+      row.style.gap = "4px";
+      row.style.padding = "10px";
+      row.style.border = "1px solid var(--background-modifier-accent, rgba(255,255,255,0.12))";
+      row.style.borderRadius = "8px";
+
+      const label = document.createElement("label");
+      label.style.display = "flex";
+      label.style.alignItems = "center";
+      label.style.justifyContent = "space-between";
+      label.style.gap = "10px";
+
+      const labelName = document.createElement("span");
+      labelName.textContent = labelText;
+      label.style.fontWeight = "600";
+      label.appendChild(labelName);
+
+      const helper = document.createElement("div");
+      helper.style.fontSize = "12px";
+      helper.style.opacity = "0.85";
+      helper.textContent = helperText;
+
+      row.appendChild(label);
+      row.appendChild(helper);
+      return { row, label };
+    };
+
+    const persist = (partial) => {
+      this.saveSettings(partial);
+      status.textContent = "Saved";
+      clearTimeout(status._timer);
+      status._timer = setTimeout(() => {
+        status.textContent = "";
+      }, 1500);
+    };
+
+    const kickSelfRow = makeRow(
+      "Kick yourself",
+      "If disabled, your own account is never included in the bulk disconnect."
+    );
+    const kickSelfInput = document.createElement("input");
+    kickSelfInput.type = "checkbox";
+    kickSelfInput.checked = !!settings.kickSelf;
+    kickSelfRow.label.appendChild(kickSelfInput);
+    wrap.appendChild(kickSelfRow.row);
+
+    const kickSelfLastRow = makeRow(
+      "Kick yourself in last position",
+      "If enabled, your account is processed after all other users."
+    );
+    const kickSelfLastInput = document.createElement("input");
+    kickSelfLastInput.type = "checkbox";
+    kickSelfLastInput.checked = !!settings.kickSelfLast;
+    kickSelfLastRow.label.appendChild(kickSelfLastInput);
+    wrap.appendChild(kickSelfLastRow.row);
+
+    const modeRow = makeRow(
+      "Default disconnect settings",
+      "Default mode preselected in the confirmation modal."
+    );
+    const modeSelect = document.createElement("select");
+    modeSelect.style.padding = "4px 8px";
+    modeSelect.style.borderRadius = "6px";
+    modeSelect.style.background = "var(--background-primary, #1e1f22)";
+    modeSelect.style.color = "var(--text-normal, #fff)";
+    modeSelect.style.border = "1px solid var(--background-modifier-accent, rgba(255,255,255,0.12))";
+
+    const optionSafe = document.createElement("option");
+    optionSafe.value = "safe";
+    optionSafe.textContent = "Safe";
+    modeSelect.appendChild(optionSafe);
+
+    const optionHard = document.createElement("option");
+    optionHard.value = "hard";
+    optionHard.textContent = "Hard";
+    modeSelect.appendChild(optionHard);
+
+    modeSelect.value = this.normalizeDisconnectMode(settings.defaultMode);
+    modeRow.label.appendChild(modeSelect);
+    wrap.appendChild(modeRow.row);
+
+    const status = document.createElement("div");
+    status.style.fontSize = "12px";
+    status.style.opacity = "0.85";
+    status.style.minHeight = "16px";
+    wrap.appendChild(status);
+
+    const syncKickSelfLastState = () => {
+      const enabled = !!kickSelfInput.checked;
+      kickSelfLastInput.disabled = !enabled;
+      kickSelfLastInput.style.opacity = enabled ? "1" : "0.6";
+    };
+
+    kickSelfInput.addEventListener("change", () => {
+      persist({ kickSelf: kickSelfInput.checked });
+      syncKickSelfLastState();
+    });
+
+    kickSelfLastInput.addEventListener("change", () => {
+      persist({ kickSelfLast: kickSelfLastInput.checked });
+    });
+
+    modeSelect.addEventListener("change", () => {
+      persist({ defaultMode: modeSelect.value });
+    });
+
+    syncKickSelfLastState();
     return wrap;
   }
 };
